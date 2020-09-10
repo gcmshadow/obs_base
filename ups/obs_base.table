@@ -1,11 +1,4 @@
-setupRequired(daf_base)
-setupRequired(log)
-setupRequired(daf_persistence)
-setupRequired(afw)
-setupRequired(utils)
 setupRequired(astro_metadata_translator)
-setupRequired(geom)
-setupRequired(daf_butler)
 setupRequired(pipe_base)
 setupOptional(skymap)
 
