@@ -28,6 +28,7 @@ import sqlite3
 from typing import TYPE_CHECKING, Dict, Iterator, List, Mapping, Tuple, Optional
 
 import astropy.time
+import astropy.units as u
 
 from lsst.daf.butler import DataCoordinate, FileDataset, Timespan
 from .repoConverter import RepoConverter
@@ -188,8 +189,71 @@ class CalibRepoConverter(RepoConverter):
                             "Gen2 calibration registry entry has no dataset: %s for calibDate=%s, %s.",
                             datasetType.name, calibDate, dataId
                         )
+        # Analyze the timespans to check for overlap problems
+        # Need to group the timespans by DatasetType name + DataId
+        # Gaps of a day should be closed since we assume differing
+        # conventions in gen2 repos.
+        timespansByDataId = defaultdict(list)
+        for timespan in sorted(refsByTimespan):
+            print(f"{timespan}:")
+            for r in refsByTimespan[timespan]:
+                print(f"\t{r}")
+                timespansByDataId[(r.dataId, r.datasetType.name)].append((timespan, r))
+
+        for k, timespans in timespansByDataId.items():
+            print(f"{k}:")
+            for t, r in timespans:
+                print(f"\t{t}: {r}")
+
+        # A day with a bit of fuzz for comparison
+        fuzzy_day = astropy.time.TimeDelta(1.001, format="jd", scale="tai")
+        correctedRefsByTimespan = defaultdict(list)
+
+        # Loop over each group and plug gaps.
+        # Since in many cases the validity ranges are relevant for multiple
+        # dataset types and dataIds we don't want to over-report
+        info_messages = set()
+        warn_messages = set()
+        for timespans in timespansByDataId.values():
+            # Sort all the timespans and check overlaps
+            sorted_timespans = sorted(timespans, key=lambda x: x[0])
+            timespan_prev, ref_prev = sorted_timespans.pop(0)
+            for timespan, ref in sorted_timespans:
+                # See if we have a suspicious gap
+                delta = timespan.begin - timespan_prev.end
+                if abs(delta) < fuzzy_day:
+                    if delta > 0:
+                        # Gap between timespans
+                        msg = f"Calibration validity gap closed for {timespan_prev.end} to {timespan.begin}"
+                        info_messages.add(msg)
+                    else:
+                        # Overlap of timespans
+                        msg = f"Calibration validity overlap of {abs(delta).to(u.s)} removed for period " \
+                            f"{timespan.begin} to {timespan_prev.end}"
+                        warn_messages.add(msg)
+                    # Assume this gap is down to convention in gen2.
+                    # We have to adjust the previous timespan to fit
+                    # since we always trust validStart.
+                    timespan_prev = Timespan(begin=timespan_prev.begin,
+                                             end=timespan.begin)
+                # Store the previous timespan and ref since it has now
+                # been verified
+                correctedRefsByTimespan[timespan_prev].append(ref_prev)
+
+                # And update the previous values for the next iteration
+                timespan_prev = timespan
+                ref_prev = ref
+
+            # Store the final timespan/ref pair
+            correctedRefsByTimespan[timespan_prev].append(ref_prev)
+
+        for msg in sorted(info_messages):
+            self.task.log.info(msg)
+        for msg in sorted(warn_messages):
+            self.task.log.warn(msg)
+
         # Done reading from Gen2, time to certify into Gen3.
-        for timespan, refs in refsByTimespan.items():
+        for timespan, refs in correctedRefsByTimespan.items():
             self.task.registry.certify(self.collection, refs, timespan)
 
     def getRun(self, datasetTypeName: str, calibDate: Optional[str] = None) -> str:
